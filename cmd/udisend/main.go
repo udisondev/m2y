@@ -1,12 +1,10 @@
 package main
 
 import (
-	"crypto/ecdh"
-	"crypto/ed25519"
-	"crypto/rand"
 	"log"
 	"m2y/internal/node"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -27,37 +25,14 @@ func main() {
 		}
 	}
 
-	privateECDH, err := ecdh.P256().GenerateKey(rand.Reader)
+	n, err := node.New(addr, 10)
 	if err != nil {
-	}
-
-	public, private, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-	}
-	n := node.Node{
-		Addr:        addr,
-		ID:          privateECDH.PublicKey().Bytes(),
-		Peers:       map[string]*node.Peer{},
-		Inbox:       make(chan node.Income),
-		WaitOffers:  map[string]node.Offerer{},
-		WaitAnswers: map[string]node.Answerer{},
-		Onboardings: map[string]*node.Onboarding{},
-		EDPublic:    public,
-		EDPrivate:   private,
-		ECDHPublic:  privateECDH.PublicKey(),
-		ECDHPrivate: privateECDH,
-	}
-
-	log.Printf("Addr=%s", addr)
-	if addr != "" {
-		log.Printf("Addr is not nil")
-		go func() {
-			n.Start()
-		}()
+		log.Fatalf("Run node: %v", err)
+		return
 	}
 
 	go func() {
-		n.Run(1)
+		n.Run(runtime.NumCPU())
 	}()
 
 	if connectTo != "" {

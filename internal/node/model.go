@@ -26,16 +26,21 @@ const (
 	SignalTypeConnectionProof             = 0x06
 )
 
-type Income struct {
-	From   PeerID
+var (
+	pingSignal = []byte{0xFE}
+	pongSignal = []byte{0xFF}
+)
+
+type income struct {
+	From   peerID
 	Signal Signal
 }
 
-func (i Income) RecepientHex256() string {
+func (i income) RecepientHex256() string {
 	return ParseHex256(i.Signal.Receipient)
 }
 
-func (i Income) IsForMe(ID PeerID) bool {
+func (i income) IsForMe(ID peerID) bool {
 	myHash := ID.Sum256()
 	return bytes.Equal(myHash[:], i.Signal.Receipient[:])
 }

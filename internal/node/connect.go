@@ -11,13 +11,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-func (n *Node) Connect(peerAddr string) error {
+func (n *node) Connect(peerAddr string) error {
 	conn, _, err := websocket.DefaultDialer.Dial("ws://"+peerAddr+"/ws", nil)
 	if err != nil {
 		return err
@@ -54,7 +53,7 @@ func (n *Node) Connect(peerAddr string) error {
 		peerIDBytes = peerID
 	}
 
-	err = conn.WriteMessage(websocket.BinaryMessage, n.ECDHPublic.Bytes())
+	err = conn.WriteMessage(websocket.BinaryMessage, n.ecdhPublic.Bytes())
 	if err != nil {
 		return fmt.Errorf("conn.WriteMessage: %w", err)
 	}
@@ -84,8 +83,8 @@ func (n *Node) Connect(peerAddr string) error {
 		conn.WriteMessage(websocket.BinaryMessage, decrypted)
 	}
 
-	peerID := PeerID(peerIDBytes)
-	n.EntrypointID = peerID
+	peerID := peerID(peerIDBytes)
+	n.entrypointID = peerID
 
 	inbox := make(chan []byte)
 	outbox := n.addConn(pubKey, inbox, true)
@@ -95,24 +94,24 @@ func (n *Node) Connect(peerAddr string) error {
 }
 
 func tcpInteraction(inbox chan<- []byte, outbox <-chan []byte, conn *websocket.Conn) {
-	ping := make(chan struct{})
-	pong := make(chan struct{})
+	pingCh := make(chan struct{})
+	pongCh := make(chan struct{})
 	isDead := make(chan struct{})
 
 	outbox = func(ch <-chan []byte) <-chan []byte {
-		out := make(chan []byte, 256)
+		out := make(chan []byte, outboxSize)
 
 		go func() {
 			defer close(out)
 			defer conn.Close()
 
-			pingTicker := time.NewTicker(time.Second * 7)
+			pingTicker := time.NewTicker(pingPeriod)
 			for {
 				select {
-				case <-ping:
-					out <- []byte{0xFF}
+				case <-pingCh:
+					out <- pongSignal
 				case <-pingTicker.C:
-					out <- []byte{0xFE}
+					out <- pingSignal
 				case data, work := <-ch:
 					if !work {
 						return
@@ -142,15 +141,15 @@ func tcpInteraction(inbox chan<- []byte, outbox <-chan []byte, conn *websocket.C
 				return
 			}
 
-			if bytes.Equal(data, []byte{0xFE}) {
+			if bytes.Equal(data, pingSignal) {
 				log.Println("Ping")
-				ping <- struct{}{}
+				pingCh <- struct{}{}
 				continue
 			}
 
-			if bytes.Equal(data, []byte{0xFF}) {
+			if bytes.Equal(data, pongSignal) {
 				log.Println("Pong")
-				pong <- struct{}{}
+				pongCh <- struct{}{}
 				continue
 			}
 
@@ -166,209 +165,19 @@ func tcpInteraction(inbox chan<- []byte, outbox <-chan []byte, conn *websocket.C
 
 		for {
 			select {
-			case <-pong:
+			case <-pongCh:
 				continue
-			case <-time.After(time.Second * 11):
+			case <-time.After(pongWaitTime):
 				return
 			}
 		}
 	}()
 }
 
-func (n *Node) addConn(
-	pubKey *ecdh.PublicKey,
-	inbox <-chan []byte,
-	trusted bool,
-) <-chan []byte {
-	outbox := make(chan []byte, 256)
-
-	peerID := PeerID(pubKey.Bytes())
-	peer := Peer{ID: peerID}
-	if trusted {
-		log.Println(peerID.Hex256(), "Trusted!")
-		peer.State = Trusted
-	}
-
-	peer.Disconnect = sync.OnceFunc(func() {
-		peer.Mutex.Lock()
-		defer peer.Mutex.Unlock()
-		peer.State = Disconntected
-
-		close(outbox)
-		log.Println(peerID.Hex256(), "Disconnected!")
-	})
-
-	peer.Send = func(s Signal) {
-		n.duplicatedBytesMu.Lock()
-		n.duplicatedBytes[s.NonceHex()] = struct{}{}
-		n.duplicatedBytesMu.Unlock()
-
-		peer.Mutex.RLock()
-		defer peer.Mutex.RUnlock()
-
-		if peer.State == Disconntected {
-			return
-		}
-
-		out, err := s.MarshalBinary()
-		if err != nil {
-			return
-		}
-
-		select {
-		case outbox <- out:
-		default:
-			go n.Disconnect(peerID.Hex256())
-		}
-	}
-
-	n.PeersMu.Lock()
-	n.Peers[peerID.Hex256()] = &peer
-	n.PeersMu.Unlock()
-
-	go func() {
-		defer func() {
-			n.Disconnect(peerID.Hex256())
-		}()
-
-		for data := range decryptChan(inbox, n.ECDHPrivate, pubKey) {
-			var s Signal
-			err := s.UnmarshalBinary(data)
-			if err != nil {
-				return
-			}
-
-			n.duplicatedBytesMu.Lock()
-			_, ok := n.duplicatedBytes[s.NonceHex()]
-			n.duplicatedBytesMu.Unlock()
-			if ok {
-				continue
-			}
-			n.duplicatedBytesMu.Lock()
-			n.duplicatedBytes[s.NonceHex()] = struct{}{}
-			n.duplicatedBytesMu.Unlock()
-
-			n.Inbox <- Income{
-				From:   peerID,
-				Signal: s,
-			}
-		}
-	}()
-
-	log.Println("New peer:", peerID.Hex256())
-
-	return encryptChan(outbox, pubKey, n.ECDHPrivate)
-}
-
-func encryptChan(ch <-chan []byte, receiverKey *ecdh.PublicKey, senderKey *ecdh.PrivateKey) <-chan []byte {
-	out := make(chan []byte)
-	go func() {
-		defer close(out)
-
-		for payload := range ch {
-			aesKey := make([]byte, 32)
-			if _, err := rand.Read(aesKey); err != nil {
-				return
-			}
-
-			block, err := aes.NewCipher(aesKey)
-			if err != nil {
-				return
-			}
-			gcm, err := cipher.NewGCM(block)
-			if err != nil {
-				return
-			}
-			nonceAES := make([]byte, gcm.NonceSize())
-			if _, err := rand.Read(nonceAES); err != nil {
-				return
-			}
-			encryptedPayload := gcm.Seal(nonceAES, nonceAES, payload, nil)
-
-			sharedSecret, err := senderKey.ECDH(receiverKey)
-			if err != nil {
-				return
-			}
-			sharedKey := sha256.Sum256(sharedSecret)
-			keyBlock, err := aes.NewCipher(sharedKey[:])
-			if err != nil {
-				return
-			}
-			keyGCM, err := cipher.NewGCM(keyBlock)
-			if err != nil {
-				return
-			}
-			keyNonce := make([]byte, keyGCM.NonceSize())
-			if _, err := rand.Read(keyNonce); err != nil {
-				return
-			}
-			encryptedAESKey := keyGCM.Seal(keyNonce, keyNonce, aesKey, nil)
-
-			out <- append(encryptedAESKey, encryptedPayload...)
-		}
-	}()
-
-	return out
-}
-func decryptChan(ch <-chan []byte, receverKey *ecdh.PrivateKey, senderKey *ecdh.PublicKey) <-chan []byte {
-	out := make(chan []byte)
-	go func() {
-		defer close(out)
-		for data := range ch {
-			sharedSecret, err := receverKey.ECDH(senderKey)
-			if err != nil {
-				return
-			}
-			sharedKey := sha256.Sum256(sharedSecret)
-			keyBlock, err := aes.NewCipher(sharedKey[:])
-			if err != nil {
-				return
-			}
-			keyGCM, err := cipher.NewGCM(keyBlock)
-			if err != nil {
-				return
-			}
-			nonceSize := keyGCM.NonceSize()
-			expectedKeyLen := nonceSize + 32 + 16
-			if len(data) < expectedKeyLen {
-				return
-			}
-
-			encryptedAESKey := data[:expectedKeyLen]
-			aesKey, err := keyGCM.Open(nil, encryptedAESKey[:nonceSize], encryptedAESKey[nonceSize:], nil)
-			if err != nil {
-				return
-			}
-
-			encryptedPayload := data[expectedKeyLen:]
-			block, err := aes.NewCipher(aesKey)
-			if err != nil {
-				return
-			}
-			gcm, err := cipher.NewGCM(block)
-			if err != nil {
-				return
-			}
-			if len(encryptedPayload) < gcm.NonceSize() {
-				return
-			}
-			nonce := encryptedPayload[:gcm.NonceSize()]
-			ciphertext := encryptedPayload[gcm.NonceSize():]
-			decryptedPayload, err := gcm.Open(nil, nonce, ciphertext, nil)
-			if err != nil {
-				return
-			}
-
-			out <- decryptedPayload
-		}
-	}()
-	return out
-}
-
-func (n *Node) handleConnection(w http.ResponseWriter, r *http.Request) {
+func (n *node) handleConnection(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
+		ReadBufferSize:  readBufferSize,
+		WriteBufferSize: writeBufferSize,
 		CheckOrigin:     func(r *http.Request) bool { return true },
 	}
 
@@ -394,13 +203,13 @@ func (n *Node) handleConnection(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
-		if len(data) != 65 {
+		if len(data) != ecdhPubKeyLength {
 			return
 		}
 		peerIDResp <- data
 	}()
 
-	err = conn.WriteMessage(websocket.BinaryMessage, n.ECDHPublic.Bytes())
+	err = conn.WriteMessage(websocket.BinaryMessage, n.ecdhPublic.Bytes())
 	if err != nil {
 		return
 	}
@@ -419,7 +228,7 @@ func (n *Node) handleConnection(w http.ResponseWriter, r *http.Request) {
 		peerIDBytes = peerID
 	}
 
-	challenge := make([]byte, 32)
+	challenge := make([]byte, challengeSize)
 	_, err = rand.Read(challenge)
 	if err != nil {
 		return
@@ -453,35 +262,38 @@ func (n *Node) handleConnection(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	peerID := PeerID(peerIDBytes)
-	inbox := make(chan []byte, 10)
-	trusted := len(n.Peers) == 0
-	outbox := n.addConn(pubKey, inbox, trusted)
+	peerID := peerID(peerIDBytes)
+	inbox := make(chan []byte, inboxBufSizePerPeer)
+
+	n.peersMu.RLock()
+	peersCount := len(n.peers)
+	n.peersMu.RUnlock()
+
+	outbox := n.addConn(pubKey, inbox, peersCount == 0)
+
 	tcpInteraction(inbox, outbox, conn)
 
-	n.PeersMu.RLock()
-	peersCount := len(n.Peers)
-	n.PeersMu.RUnlock()
-
-	if peersCount > 1 {
-		n.OnboardingsMu.Lock()
-		n.Onboardings[peerID.Hex256()] = &Onboarding{
+	log.Println("Peers count", peersCount)
+	if peersCount > 0 {
+		n.onboardingsMu.Lock()
+		n.onboardings[peerID.Hex256()] = &onboarding{
 			Secrets:       [][]byte{},
-			RequiresConns: min(peersCount-1, 5),
+			RequiresConns: min(peersCount-1, reqConnsCount),
 		}
-		n.OnboardingsMu.Unlock()
+		n.onboardingsMu.Unlock()
 
 		n.broadcast(NewSignal(
 			SignalTypeNeedPeerInvite,
 			pubKey.Bytes(),
 			WithRecepient(peerID.Sum256()),
 		))
+		log.Println("Broadcast onboarding")
 	}
 
 }
 
-func (n *Node) encryptChallenge(challenge []byte, verifierECPub *ecdh.PublicKey) ([]byte, error) {
-	sharedSecret, err := n.ECDHPrivate.ECDH(verifierECPub)
+func (n *node) encryptChallenge(challenge []byte, verifierECPub *ecdh.PublicKey) ([]byte, error) {
+	sharedSecret, err := n.ecdhPrivate.ECDH(verifierECPub)
 	if err != nil {
 		return nil, fmt.Errorf("generate sharred secret: %w", err)
 	}
@@ -501,8 +313,8 @@ func (n *Node) encryptChallenge(challenge []byte, verifierECPub *ecdh.PublicKey)
 	return gcm.Seal(nonce, nonce, challenge, nil), nil
 }
 
-func (n *Node) decryptChallenge(ciphertext []byte, verifierECPub *ecdh.PublicKey) ([]byte, error) {
-	sharedSecret, err := n.ECDHPrivate.ECDH(verifierECPub)
+func (n *node) decryptChallenge(ciphertext []byte, verifierECPub *ecdh.PublicKey) ([]byte, error) {
+	sharedSecret, err := n.ecdhPrivate.ECDH(verifierECPub)
 	if err != nil {
 		return nil, fmt.Errorf("generate sharred secret: %w", err)
 	}
@@ -521,16 +333,4 @@ func (n *Node) decryptChallenge(ciphertext []byte, verifierECPub *ecdh.PublicKey
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 
 	return gcm.Open(nil, nonce, ciphertext, nil)
-}
-
-func (n *Node) Disconnect(peerID string) {
-	n.PeersMu.Lock()
-	defer n.PeersMu.Unlock()
-	peer, ok := n.Peers[peerID]
-	if !ok {
-		return
-	}
-	peer.Disconnect()
-
-	delete(n.Peers, peerID)
 }
