@@ -10,7 +10,7 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-func answer(n *node, answerMsg income) {
+func answer(n *Node, answerMsg income) {
 	n.onboardingsMu.RLock()
 	_, hasAnswerWaiters := n.onboardings[answerMsg.RecepientHex256()]
 	n.onboardingsMu.RUnlock()
@@ -36,7 +36,7 @@ func answer(n *node, answerMsg income) {
 
 }
 
-func handleMineAnswer(n *node, answerMsg income) {
+func handleMineAnswer(n *Node, answerMsg income) {
 	peerHex := ParseHex256(answerMsg.Signal.Sender)
 	log.Println("Received aswer from:", peerHex)
 

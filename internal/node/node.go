@@ -19,13 +19,8 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-type Runnable interface {
-	Run(workerCount int)
-	Connect(addr string) error
-}
-
 type (
-	node struct {
+	Node struct {
 		addr string
 
 		id           peerID
@@ -66,18 +61,22 @@ type (
 	}
 )
 
-func New(addr string, peersCount int) (Runnable, error) {
+func New(addr string, peersCount int) (Node, error) {
+	if addr != "" {
+		peersCount = peersCount * 100
+	}
+
 	privateECDH, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("generate ECDH: %w", err)
+		return Node{}, fmt.Errorf("generate ECDH: %w", err)
 	}
 
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("generate ed25519: %w", err)
+		return Node{}, fmt.Errorf("generate ed25519: %w", err)
 	}
 
-	return &node{
+	return Node{
 		addr:         addr,
 		id:           privateECDH.PublicKey().Bytes(),
 		peers:        make(map[string]*peer, peersCount),
@@ -93,7 +92,7 @@ func New(addr string, peersCount int) (Runnable, error) {
 	}, nil
 }
 
-func (n *node) Run(workersN int) {
+func (n *Node) Run(workersN int) {
 	log.Println("My peerID:", n.id.Hex256())
 	n.inbox = make(chan income)
 
@@ -139,7 +138,7 @@ func (n *node) Run(workersN int) {
 	wg.Wait()
 }
 
-func (n *node) addConn(
+func (n *Node) addConn(
 	pubKey *ecdh.PublicKey,
 	inbox <-chan []byte,
 	trusted bool,
@@ -322,7 +321,7 @@ func decryptChan(ch <-chan []byte, receverKey *ecdh.PrivateKey, senderKey *ecdh.
 	return out
 }
 
-func (n *node) broadcast(s Signal) {
+func (n *Node) broadcast(s Signal) {
 	n.peersMu.RLock()
 	defer n.peersMu.RUnlock()
 	for _, p := range n.peers {
@@ -334,7 +333,7 @@ func (n *node) broadcast(s Signal) {
 	}
 }
 
-func (n *node) sendToEntrypoint(s Signal) error {
+func (n *Node) sendToEntrypoint(s Signal) error {
 	n.peersMu.RLock()
 	defer n.peersMu.RUnlock()
 
@@ -347,7 +346,7 @@ func (n *node) sendToEntrypoint(s Signal) error {
 	return nil
 }
 
-func (n *node) trust(peerHex string) bool {
+func (n *Node) trust(peerHex string) bool {
 	n.peersMu.RLock()
 	defer n.peersMu.RUnlock()
 	peer, ok := n.peers[peerHex]
@@ -362,7 +361,7 @@ func (n *node) trust(peerHex string) bool {
 	return true
 }
 
-func (n *node) disconnect(peerID string) {
+func (n *Node) disconnect(peerID string) {
 	n.peersMu.Lock()
 	defer n.peersMu.Unlock()
 	peer, ok := n.peers[peerID]

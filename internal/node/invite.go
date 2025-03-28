@@ -11,9 +11,10 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-func needInvite(n *node, invReq income) {
+func needInvite(n *Node, invReq income) {
 	log.Println("Received invite request")
 	if len(n.peers) > maxPeersCount {
+		log.Println("Has no free peer slot")
 		n.broadcast(invReq.Signal)
 		return
 	}
@@ -61,7 +62,7 @@ func needInvite(n *node, invReq income) {
 	log.Println("Invite was sent to:", ParseHex256(invReq.Signal.Receipient))
 }
 
-func invite(n *node, inviteMsg income) {
+func invite(n *Node, inviteMsg income) {
 	recipientHex := ParseHex256(inviteMsg.Signal.Receipient)
 
 	n.onboardingsMu.RLock()
@@ -91,7 +92,7 @@ func invite(n *node, inviteMsg income) {
 	}
 }
 
-func handleMineInvite(n *node, inviteMsg income) {
+func handleMineInvite(n *Node, inviteMsg income) {
 	pID := peerID(inviteMsg.Signal.Payload[:ecdhPubKeyLength])
 	log.Println("Received invite from:", pID.Hex256())
 

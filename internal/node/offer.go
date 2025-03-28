@@ -10,7 +10,7 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-func offer(n *node, offerMsg income) {
+func offer(n *Node, offerMsg income) {
 	if !offerMsg.IsForMe(n.id) {
 		n.broadcast(offerMsg.Signal)
 		return

@@ -16,7 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func (n *node) Connect(peerAddr string) error {
+func (n *Node) Connect(peerAddr string) error {
 	conn, _, err := websocket.DefaultDialer.Dial("ws://"+peerAddr+"/ws", nil)
 	if err != nil {
 		return err
@@ -174,7 +174,7 @@ func tcpInteraction(inbox chan<- []byte, outbox <-chan []byte, conn *websocket.C
 	}()
 }
 
-func (n *node) handleConnection(w http.ResponseWriter, r *http.Request) {
+func (n *Node) handleConnection(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  readBufferSize,
 		WriteBufferSize: writeBufferSize,
@@ -292,7 +292,7 @@ func (n *node) handleConnection(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func (n *node) encryptChallenge(challenge []byte, verifierECPub *ecdh.PublicKey) ([]byte, error) {
+func (n *Node) encryptChallenge(challenge []byte, verifierECPub *ecdh.PublicKey) ([]byte, error) {
 	sharedSecret, err := n.ecdhPrivate.ECDH(verifierECPub)
 	if err != nil {
 		return nil, fmt.Errorf("generate sharred secret: %w", err)
@@ -313,7 +313,7 @@ func (n *node) encryptChallenge(challenge []byte, verifierECPub *ecdh.PublicKey)
 	return gcm.Seal(nonce, nonce, challenge, nil), nil
 }
 
-func (n *node) decryptChallenge(ciphertext []byte, verifierECPub *ecdh.PublicKey) ([]byte, error) {
+func (n *Node) decryptChallenge(ciphertext []byte, verifierECPub *ecdh.PublicKey) ([]byte, error) {
 	sharedSecret, err := n.ecdhPrivate.ECDH(verifierECPub)
 	if err != nil {
 		return nil, fmt.Errorf("generate sharred secret: %w", err)

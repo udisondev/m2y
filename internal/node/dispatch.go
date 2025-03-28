@@ -4,7 +4,7 @@ import (
 	"log"
 )
 
-var handlers = map[SignalType]func(*node, income){
+var handlers = map[SignalType]func(*Node, income){
 	SignalTypeNeedPeerInvite:   needInvite,
 	SignalTypePeerInvite:       invite,
 	SignalTypePeerOffer:        offer,
@@ -13,7 +13,7 @@ var handlers = map[SignalType]func(*node, income){
 	SignalTypeConnectionProof:  connectionProof,
 }
 
-func (n *node) dispatch(msg income) {
+func (n *Node) dispatch(msg income) {
 	h, ok := handlers[msg.Signal.Type]
 	if !ok {
 		log.Println("Has no handler for:", msg.Signal.Type)

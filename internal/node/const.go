@@ -2,7 +2,7 @@ package node
 
 import "time"
 
-const (
+var (
 	outboxSize            = 256
 	pingPeriod            = time.Second * 7
 	pongWaitTime          = time.Second * 11

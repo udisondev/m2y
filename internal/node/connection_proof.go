@@ -5,7 +5,7 @@ import (
 	"log"
 )
 
-func secret(n *node, msg income) {
+func secret(n *Node, msg income) {
 	err := n.sendToEntrypoint(NewSignal(
 		SignalTypeConnectionProof,
 		msg.Signal.Payload,
@@ -17,7 +17,7 @@ func secret(n *node, msg income) {
 
 }
 
-func connectionProof(n *node, msg income) {
+func connectionProof(n *Node, msg income) {
 	peerHex := msg.From.Hex256()
 	n.onboardingsMu.Lock()
 	defer n.onboardingsMu.Unlock()
@@ -39,6 +39,12 @@ func connectionProof(n *node, msg income) {
 			n.trust(peerHex)
 			log.Println(peerHex, "are trusted yet!")
 			delete(n.onboardings, peerHex)
+			n.peersMu.Lock()
+			defer n.peersMu.Unlock()
+
+			if len(n.peers) > maxPeersCount {
+				n.disconnect(peerHex)
+			}
 		}
 		return
 	}
