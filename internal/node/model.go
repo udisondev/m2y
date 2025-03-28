@@ -24,11 +24,15 @@ const (
 	SignalTypePeerAnswer                  = 0x04
 	SignalTypeConnectionSecret            = 0x05
 	SignalTypeConnectionProof             = 0x06
+	SignalTypeChatInvite                  = 0x10
+	SignalTypeChatOffer                   = 0x11
+	SignalTypeChatAnswer                  = 0x12
 )
 
 var (
 	pingSignal = []byte{0xFE}
 	pongSignal = []byte{0xFF}
+	invalidID  = []byte{0xED}
 )
 
 type income struct {

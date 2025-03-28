@@ -32,7 +32,7 @@ func needInvite(n *Node, invReq income) {
 		return
 	}
 
-	encryptedPayload, err := crypt.EncryptMessage(sign, n.ecdhPrivate, n.edPrivate, n.edPublic, pubKey)
+	encryptedPayload, err := crypt.EncryptPeerMessage(sign, n.ecdhPrivate, n.edPrivate, n.edPublic, pubKey)
 	if err != nil {
 		return
 	}
@@ -46,20 +46,20 @@ func needInvite(n *Node, invReq income) {
 	encryptedPayload = append(n.ecdhPublic.Bytes(), encryptedPayload...)
 	encryptedPayload = append(secret, encryptedPayload...)
 
-	n.waitOffersMu.Lock()
-	n.waitOffers[peerID.Hex256()] = offerer{
+	n.waitPeerOffersMu.Lock()
+	n.waitPeerOffers[peerID.Hex256()] = offerer{
 		ecdhPublic: pubKey,
 		sign:       sign,
 		secret:     secret,
 	}
-	n.waitOffersMu.Unlock()
+	n.waitPeerOffersMu.Unlock()
 
 	go func() {
 		<-time.After(waitOfferTimeout)
 		log.Println("Offer removed")
-		n.waitOffersMu.Lock()
-		delete(n.waitOffers, peerID.Hex256())
-		n.waitOffersMu.Unlock()
+		n.waitPeerOffersMu.Lock()
+		delete(n.waitPeerOffers, peerID.Hex256())
+		n.waitPeerOffersMu.Unlock()
 	}()
 
 	n.broadcast(NewSignal(
@@ -110,7 +110,7 @@ func handleMineInvite(n *Node, inviteMsg income) {
 		return
 	}
 
-	decryptedPayload, err := crypt.DecryptMessage(inviteMsg.Signal.Payload[ecdhPubKeyLength:], n.ecdhPrivate, pubKey)
+	decryptedPayload, err := crypt.DecryptPeerMessage(inviteMsg.Signal.Payload[ecdhPubKeyLength:], n.ecdhPrivate, pubKey)
 	if err != nil {
 		return
 	}
@@ -162,25 +162,25 @@ func handleMineInvite(n *Node, inviteMsg income) {
 
 	sign := decryptedPayload
 	payload := append(sign, SDP...)
-	encryptedPayload, err := crypt.EncryptMessage(payload, n.ecdhPrivate, n.edPrivate, n.edPublic, pubKey)
+	encryptedPayload, err := crypt.EncryptPeerMessage(payload, n.ecdhPrivate, n.edPrivate, n.edPublic, pubKey)
 	if err != nil {
 		return
 	}
 
-	n.waitAnswersMu.Lock()
-	n.waitAnswers[peerID.Hex256()] = answerer{
+	n.waitPeerAnswersMu.Lock()
+	n.waitPeerAnswers[peerID.Hex256()] = answerer{
 		ecdhPublic: pubKey,
 		pc:         pc,
 		dc:         dc,
 	}
-	n.waitAnswersMu.Unlock()
+	n.waitPeerAnswersMu.Unlock()
 
 	go func() {
 		<-time.After(waitOfferTimeout)
 		log.Println("Answer removed")
-		n.waitAnswersMu.Lock()
-		delete(n.waitAnswers, peerID.Hex256())
-		n.waitAnswersMu.Unlock()
+		n.waitPeerAnswersMu.Lock()
+		delete(n.waitPeerAnswers, peerID.Hex256())
+		n.waitPeerAnswersMu.Unlock()
 	}()
 
 	err = n.sendToEntrypoint(NewSignal(
@@ -193,4 +193,107 @@ func handleMineInvite(n *Node, inviteMsg income) {
 		return
 	}
 	log.Println("Offer was send to:", peerID.Hex256())
+}
+
+func chatInvite(n *Node, inviteMsg income) {
+	myPeerID := peerID(n.client.ECDHPrivate().PublicKey().Bytes())
+	if !inviteMsg.IsForMe(myPeerID) {
+		n.broadcast(inviteMsg.Signal)
+		return
+	}
+
+	peerID := peerID(inviteMsg.Signal.Payload[:ecdhPubKeyLength])
+	log.Println("Received chat invite from:", peerID.Hex256())
+	if !n.client.Welcome(peerID.Hex()) {
+		return
+	}
+
+	pubKey, err := peerID.PubKey()
+	if err != nil {
+		return
+	}
+
+	decryptedPayload, err := crypt.DecryptPeerMessage(inviteMsg.Signal.Payload[ecdhPubKeyLength:], n.ecdhPrivate, pubKey)
+	if err != nil {
+		return
+	}
+
+	config := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{
+				URLs: []string{
+					"stun:stun.l.google.com:19302",
+				},
+			},
+		},
+	}
+	pc, err := webrtc.NewPeerConnection(config)
+	if err != nil {
+		return
+	}
+
+	defer func() {
+		if err == nil {
+			return
+		}
+		pc.Close()
+	}()
+
+	dc, err := pc.CreateDataChannel("network", nil)
+	if err != nil {
+		return
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		dc.Close()
+	}()
+
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		return
+	}
+
+	if err := pc.SetLocalDescription(offer); err != nil {
+		return
+	}
+	SDP, err := json.Marshal(pc.LocalDescription())
+	if err != nil {
+		return
+	}
+
+	sign := decryptedPayload
+	payload := append(sign, SDP...)
+	encryptedPayload, err := crypt.EncryptPeerMessage(payload, n.ecdhPrivate, n.edPrivate, n.edPublic, pubKey)
+	if err != nil {
+		return
+	}
+
+	n.waitPeerAnswersMu.Lock()
+	n.waitPeerAnswers[peerID.Hex256()] = answerer{
+		ecdhPublic: pubKey,
+		pc:         pc,
+		dc:         dc,
+	}
+	n.waitPeerAnswersMu.Unlock()
+
+	go func() {
+		<-time.After(waitOfferTimeout)
+		log.Println("Answer removed")
+		n.waitPeerAnswersMu.Lock()
+		delete(n.waitPeerAnswers, peerID.Hex256())
+		n.waitPeerAnswersMu.Unlock()
+	}()
+
+	n.broadcast(NewSignal(
+		SignalTypeChatOffer,
+		encryptedPayload,
+		WithRecepient(peerID.Sum256()),
+		WithSender(myPeerID.Sum256()),
+	))
+	if err != nil {
+		return
+	}
+	log.Println("ChatOffer was send to:", peerID.Hex256())
 }

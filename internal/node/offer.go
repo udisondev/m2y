@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"m2y/pkg/crypt"
@@ -19,14 +20,14 @@ func offer(n *Node, offerMsg income) {
 	peerHex := ParseHex256(offerMsg.Signal.Sender)
 	log.Println("Received offer from:", peerHex)
 
-	n.waitOffersMu.Lock()
-	of, ok := n.waitOffers[peerHex]
-	n.waitOffersMu.Unlock()
+	n.waitPeerOffersMu.Lock()
+	of, ok := n.waitPeerOffers[peerHex]
+	n.waitPeerOffersMu.Unlock()
 	if !ok {
 		return
 	}
 
-	decryptedPayload, err := crypt.DecryptMessage(offerMsg.Signal.Payload, n.ecdhPrivate, of.ecdhPublic)
+	decryptedPayload, err := crypt.DecryptPeerMessage(offerMsg.Signal.Payload, n.ecdhPrivate, of.ecdhPublic)
 	if err != nil {
 		return
 	}
@@ -58,9 +59,9 @@ func offer(n *Node, offerMsg income) {
 
 	pc.OnDataChannel(func(dataChannel *webrtc.DataChannel) {
 		dataChannel.OnOpen(func() {
-			n.waitOffersMu.Lock()
-			delete(n.waitOffers, peerHex)
-			n.waitOffersMu.Unlock()
+			n.waitPeerOffersMu.Lock()
+			delete(n.waitPeerOffers, peerHex)
+			n.waitPeerOffersMu.Unlock()
 
 			inbox := make(chan []byte)
 
@@ -132,7 +133,7 @@ func offer(n *Node, offerMsg income) {
 				return
 			}
 
-			go peer.Send(NewSignal(
+			peer.Send(NewSignal(
 				SignalTypeConnectionSecret,
 				of.secret,
 			))
@@ -165,7 +166,7 @@ func offer(n *Node, offerMsg income) {
 		return
 	}
 
-	encryptedPayload, err := crypt.EncryptMessage(anserSDP, n.ecdhPrivate, n.edPrivate, n.edPublic, of.ecdhPublic)
+	encryptedPayload, err := crypt.EncryptPeerMessage(anserSDP, n.ecdhPrivate, n.edPrivate, n.edPublic, of.ecdhPublic)
 	if err != nil {
 		return
 	}
@@ -178,4 +179,121 @@ func offer(n *Node, offerMsg income) {
 	))
 
 	log.Println("Answer was sent to:", peerHex)
+}
+
+func chatOffer(n *Node, offerMsg income) {
+	myPeerID := peerID(n.client.ECDHPrivate().PublicKey().Bytes())
+	if !offerMsg.IsForMe(myPeerID) {
+		n.broadcast(offerMsg.Signal)
+		return
+	}
+
+	peerHex := ParseHex256(offerMsg.Signal.Sender)
+	log.Println("Received chat offer from:", peerHex)
+
+	n.waitPeerOffersMu.Lock()
+	of, ok := n.waitPeerOffers[peerHex]
+	n.waitPeerOffersMu.Unlock()
+	if !ok {
+		return
+	}
+
+	decryptedPayload, err := crypt.DecryptPeerMessage(offerMsg.Signal.Payload, n.ecdhPrivate, of.ecdhPublic)
+	if err != nil {
+		return
+	}
+
+	if !bytes.Equal(decryptedPayload[:signLength], of.sign) {
+		return
+	}
+
+	config := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{
+				URLs: []string{
+					"stun:stun.l.google.com:19302",
+				},
+			},
+		},
+	}
+
+	pc, err := webrtc.NewPeerConnection(config)
+	defer func() {
+		if err == nil {
+			return
+		}
+		pc.Close()
+	}()
+	if err != nil {
+		return
+	}
+
+	pc.OnDataChannel(func(dataChannel *webrtc.DataChannel) {
+		dataChannel.OnOpen(func() {
+			n.waitPeerOffersMu.Lock()
+			delete(n.waitPeerOffers, peerHex)
+			n.waitPeerOffersMu.Unlock()
+			ID := hex.EncodeToString(of.ecdhPublic.Bytes())
+			inbox := make(chan []byte)
+			outbox := n.client.Interact(ID, inbox)
+
+			dataChannel.OnClose(func() {
+				close(inbox)
+			})
+
+			dataChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
+				inbox <- msg.Data
+			})
+
+			go func() {
+				defer func() {
+					pc.Close()
+					dataChannel.Close()
+				}()
+
+				for out := range outbox {
+					dataChannel.Send(out)
+				}
+			}()
+		})
+	})
+
+	var sd webrtc.SessionDescription
+	json.Unmarshal(decryptedPayload[signLength:], &sd)
+	err = pc.SetRemoteDescription(sd)
+	if err != nil {
+		return
+	}
+
+	answer, err := pc.CreateAnswer(nil)
+	if err != nil {
+		return
+	}
+
+	gatherComplete := webrtc.GatheringCompletePromise(pc)
+
+	err = pc.SetLocalDescription(answer)
+	if err != nil {
+		return
+	}
+
+	<-gatherComplete
+	anserSDP, err := json.Marshal(pc.LocalDescription())
+	if err != nil {
+		return
+	}
+
+	encryptedPayload, err := crypt.EncryptPeerMessage(anserSDP, n.ecdhPrivate, n.edPrivate, n.edPublic, of.ecdhPublic)
+	if err != nil {
+		return
+	}
+
+	n.broadcast(NewSignal(
+		SignalTypeChatAnswer,
+		encryptedPayload,
+		WithRecepient(offerMsg.Signal.Sender),
+		WithSender(myPeerID.Sum256()),
+	))
+
+	log.Println("ChatAnswer was sent to:", peerHex)
 }

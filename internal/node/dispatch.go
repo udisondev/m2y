@@ -11,6 +11,9 @@ var handlers = map[SignalType]func(*Node, income){
 	SignalTypePeerAnswer:       answer,
 	SignalTypeConnectionSecret: secret,
 	SignalTypeConnectionProof:  connectionProof,
+	SignalTypeChatInvite:       chatInvite,
+	SignalTypeChatOffer:        chatOffer,
+	SignalTypeChatAnswer:       chatAnswer,
 }
 
 func (n *Node) dispatch(msg income) {

@@ -8,10 +8,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"m2y/pkg/closer"
+	"m2y/pkg/crypt"
 	"net/http"
 	"sync"
 	"time"
@@ -36,16 +38,18 @@ type (
 
 		inbox chan income
 
-		waitOffersMu sync.Mutex
-		waitOffers   map[string]offerer
+		waitPeerOffersMu sync.Mutex
+		waitPeerOffers   map[string]offerer
 
-		waitAnswersMu sync.Mutex
-		waitAnswers   map[string]answerer
+		waitPeerAnswersMu sync.Mutex
+		waitPeerAnswers   map[string]answerer
 
 		onboardingsMu sync.RWMutex
 		onboardings   map[string]*onboarding
 
 		messageCache messageCache
+
+		client NodeClient
 	}
 
 	offerer struct {
@@ -59,6 +63,18 @@ type (
 		pc         *webrtc.PeerConnection
 		dc         *webrtc.DataChannel
 	}
+
+	NodeClient interface {
+		ECDHPrivate() *ecdh.PrivateKey
+		EDPrivate() ed25519.PrivateKey
+		EDPublic() ed25519.PublicKey
+		Interact(ID string, inbox <-chan []byte) <-chan []byte
+		Welcome(ID string) bool
+	}
+)
+
+var (
+	ErrInvalidIdentifier = errors.New("invalid ID")
 )
 
 func New(addr string, peersCount int) (Node, error) {
@@ -77,18 +93,18 @@ func New(addr string, peersCount int) (Node, error) {
 	}
 
 	return Node{
-		addr:         addr,
-		id:           privateECDH.PublicKey().Bytes(),
-		peers:        make(map[string]*peer, peersCount),
-		inbox:        make(chan income),
-		waitOffers:   make(map[string]offerer, peersCount),
-		waitAnswers:  make(map[string]answerer, peersCount),
-		onboardings:  make(map[string]*onboarding, peersCount),
-		edPublic:     public,
-		edPrivate:    private,
-		ecdhPublic:   privateECDH.PublicKey(),
-		ecdhPrivate:  privateECDH,
-		messageCache: newMessageCache(),
+		addr:            addr,
+		id:              privateECDH.PublicKey().Bytes(),
+		peers:           make(map[string]*peer, peersCount),
+		inbox:           make(chan income),
+		waitPeerOffers:  make(map[string]offerer, peersCount),
+		waitPeerAnswers: make(map[string]answerer, peersCount),
+		onboardings:     make(map[string]*onboarding, peersCount),
+		edPublic:        public,
+		edPrivate:       private,
+		ecdhPublic:      privateECDH.PublicKey(),
+		ecdhPrivate:     privateECDH,
+		messageCache:    newMessageCache(),
 	}, nil
 }
 
@@ -134,6 +150,55 @@ func (n *Node) Run(workersN int) {
 	}
 
 	wg.Wait()
+}
+
+func (n *Node) SetNodeClient(client NodeClient) {
+	n.client = client
+}
+
+func (n *Node) InitiateChat(ID string) error {
+	pubKeyBytes, err := hex.DecodeString(ID)
+	if err != nil {
+		return ErrInvalidIdentifier
+	}
+
+	pubKey, err := ecdh.P256().NewPublicKey(pubKeyBytes)
+	if err != nil {
+		return ErrInvalidIdentifier
+	}
+
+	hash := sha256.Sum256(pubKeyBytes)
+	peerHex := ParseHex256(hash[:])
+
+	sign := make([]byte, 12)
+	rand.Read(sign)
+
+	encryptedSign, err := crypt.EncryptPeerMessage(sign, n.client.ECDHPrivate(), n.client.EDPrivate(), n.client.EDPublic(), pubKey)
+	if err != nil {
+		return fmt.Errorf("error encrypt sign: %w", err)
+	}
+
+	n.waitPeerOffersMu.Lock()
+	n.waitPeerOffers[peerHex] = offerer{
+		ecdhPublic: pubKey,
+		sign:       sign,
+	}
+	n.waitPeerOffersMu.Unlock()
+
+	go func() {
+		<-time.After(time.Second * 30)
+		n.waitPeerOffersMu.Lock()
+		delete(n.waitPeerOffers, peerHex)
+		n.waitPeerOffersMu.Unlock()
+	}()
+
+	n.broadcast(NewSignal(
+		SignalTypeChatInvite,
+		append(n.client.ECDHPrivate().PublicKey().Bytes(), encryptedSign...),
+		WithRecepient(hash[:]),
+	))
+
+	return nil
 }
 
 func (n *Node) addConn(

@@ -51,6 +51,10 @@ func (p peerID) Hex256() string {
 	return hex.EncodeToString(p.Sum256())
 }
 
+func (p peerID) Hex() string {
+	return hex.EncodeToString(p)
+}
+
 func (p peerID) PubKey() (*ecdh.PublicKey, error) {
 	pubKey, err := ecdh.P256().NewPublicKey([]byte(p))
 	if err != nil {

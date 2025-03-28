@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"m2y/pkg/crypt"
@@ -40,14 +41,14 @@ func handleMineAnswer(n *Node, answerMsg income) {
 	peerHex := ParseHex256(answerMsg.Signal.Sender)
 	log.Println("Received aswer from:", peerHex)
 
-	n.waitAnswersMu.Lock()
-	ans, ok := n.waitAnswers[peerHex]
-	n.waitAnswersMu.Unlock()
+	n.waitPeerAnswersMu.Lock()
+	ans, ok := n.waitPeerAnswers[peerHex]
+	n.waitPeerAnswersMu.Unlock()
 	if !ok {
 		return
 	}
 
-	decryptedPayload, err := crypt.DecryptMessage(answerMsg.Signal.Payload, n.ecdhPrivate, ans.ecdhPublic)
+	decryptedPayload, err := crypt.DecryptPeerMessage(answerMsg.Signal.Payload, n.ecdhPrivate, ans.ecdhPublic)
 	if err != nil {
 		return
 	}
@@ -58,9 +59,9 @@ func handleMineAnswer(n *Node, answerMsg income) {
 	}
 
 	ans.dc.OnOpen(func() {
-		n.waitAnswersMu.Lock()
-		delete(n.waitAnswers, peerHex)
-		n.waitAnswersMu.Unlock()
+		n.waitPeerAnswersMu.Lock()
+		delete(n.waitPeerAnswers, peerHex)
+		n.waitPeerAnswersMu.Unlock()
 		inbox := make(chan []byte)
 
 		pong := make(chan struct{})
@@ -118,6 +119,67 @@ func handleMineAnswer(n *Node, answerMsg income) {
 					ans.dc.Send(data)
 				}
 			}
+		}()
+
+	})
+
+	ans.pc.SetRemoteDescription(ansSDP)
+}
+
+func chatAnswer(n *Node, answerMsg income) {
+	myPeerID := peerID(n.client.ECDHPrivate().PublicKey().Bytes())
+	if !answerMsg.IsForMe(myPeerID) {
+		n.broadcast(answerMsg.Signal)
+		return
+	}
+
+	peerHex := ParseHex256(answerMsg.Signal.Sender)
+	log.Println("Received chat aswer from:", peerHex)
+
+	n.waitPeerAnswersMu.Lock()
+	ans, ok := n.waitPeerAnswers[peerHex]
+	n.waitPeerAnswersMu.Unlock()
+	if !ok {
+		return
+	}
+
+	decryptedPayload, err := crypt.DecryptPeerMessage(answerMsg.Signal.Payload, n.ecdhPrivate, ans.ecdhPublic)
+	if err != nil {
+		return
+	}
+	var ansSDP webrtc.SessionDescription
+	err = json.Unmarshal(decryptedPayload, &ansSDP)
+	if err != nil {
+		return
+	}
+
+	ans.dc.OnOpen(func() {
+		n.waitPeerAnswersMu.Lock()
+		delete(n.waitPeerAnswers, peerHex)
+		n.waitPeerAnswersMu.Unlock()
+
+		inbox := make(chan []byte)
+		ID := hex.EncodeToString(ans.ecdhPublic.Bytes())
+		outbox := n.client.Interact(ID, inbox)
+
+		ans.dc.OnClose(func() {
+			close(inbox)
+		})
+
+		ans.dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			inbox <- msg.Data
+		})
+
+		go func() {
+			defer func() {
+				ans.pc.Close()
+				ans.dc.Close()
+			}()
+
+			for out := range outbox {
+				ans.dc.Send(out)
+			}
+
 		}()
 
 	})
