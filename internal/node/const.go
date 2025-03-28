@@ -19,4 +19,7 @@ var (
 	connectionProofLength = 12
 	bucketsCount          = 10
 	bucketCapacity        = 10000
+	waitConnectionTimeout = time.Second * 10
+	waitOfferTimeout      = time.Second * 10
+	waitAnswerTimeout     = time.Second * 10
 )

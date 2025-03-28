@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log"
 	"m2y/pkg/crypt"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 )
@@ -53,6 +54,14 @@ func needInvite(n *Node, invReq income) {
 		secret:     secret,
 	}
 	n.waitOffersMu.Unlock()
+
+	go func() {
+		<-time.After(waitOfferTimeout)
+		n.waitOffersMu.Lock()
+		delete(n.waitOffers, peerID.Hex256())
+		n.waitOffersMu.Unlock()
+	}()
+
 	n.broadcast(NewSignal(
 		SignalTypePeerInvite,
 		encryptedPayload,
@@ -93,10 +102,10 @@ func invite(n *Node, inviteMsg income) {
 }
 
 func handleMineInvite(n *Node, inviteMsg income) {
-	pID := peerID(inviteMsg.Signal.Payload[:ecdhPubKeyLength])
-	log.Println("Received invite from:", pID.Hex256())
+	peerID := peerID(inviteMsg.Signal.Payload[:ecdhPubKeyLength])
+	log.Println("Received invite from:", peerID.Hex256())
 
-	pubKey, err := pID.PubKey()
+	pubKey, err := peerID.PubKey()
 	if err != nil {
 		return
 	}
@@ -159,21 +168,28 @@ func handleMineInvite(n *Node, inviteMsg income) {
 	}
 
 	n.waitAnswersMu.Lock()
-	n.waitAnswers[pID.Hex256()] = answerer{
+	n.waitAnswers[peerID.Hex256()] = answerer{
 		ecdhPublic: pubKey,
 		pc:         pc,
 		dc:         dc,
 	}
 	n.waitAnswersMu.Unlock()
 
+	go func() {
+		<-time.After(waitOfferTimeout)
+		n.waitAnswersMu.Lock()
+		delete(n.waitAnswers, peerID.Hex256())
+		n.waitAnswersMu.Unlock()
+	}()
+
 	err = n.sendToEntrypoint(NewSignal(
 		SignalTypePeerOffer,
 		encryptedPayload,
-		WithRecepient(pID.Sum256()),
+		WithRecepient(peerID.Sum256()),
 		WithSender(n.id.Sum256()),
 	))
 	if err != nil {
 		return
 	}
-	log.Println("Offer was send to:", pID.Hex256())
+	log.Println("Offer was send to:", peerID.Hex256())
 }

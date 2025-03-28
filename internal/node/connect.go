@@ -282,6 +282,24 @@ func (n *Node) handleConnection(w http.ResponseWriter, r *http.Request) {
 		}
 		n.onboardingsMu.Unlock()
 
+		go func() {
+			<-time.After(waitConnectionTimeout)
+			n.onboardingsMu.Lock()
+			delete(n.onboardings, peerID.Hex256())
+			n.onboardingsMu.Unlock()
+
+			n.peersMu.RLock()
+			p, ok := n.peers[peerID.Hex256()]
+			n.peersMu.RUnlock()
+			if !ok {
+				return
+			}
+			if p.State == Trusted {
+				return
+			}
+			n.disconnect(peerID.Hex256())
+		}()
+
 		n.broadcast(NewSignal(
 			SignalTypeNeedPeerInvite,
 			pubKey.Bytes(),
