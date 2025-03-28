@@ -97,8 +97,6 @@ func (n *Node) Run(workersN int) {
 	n.inbox = make(chan income)
 
 	closer.Add(func() error {
-		n.peersMu.Lock()
-		defer n.peersMu.Unlock()
 		for _, p := range n.peers {
 			p.Disconnect()
 			<-time.After(runCloseWait)
@@ -324,12 +322,14 @@ func decryptChan(ch <-chan []byte, receverKey *ecdh.PrivateKey, senderKey *ecdh.
 func (n *Node) broadcast(s Signal) {
 	n.peersMu.RLock()
 	defer n.peersMu.RUnlock()
+	log.Println("Iterate broadcast")
 	for _, p := range n.peers {
 		if p.State < Trusted {
 			continue
 		}
 
 		p.Send(s)
+		log.Printf("%d was sent to=%s", s.Type, p.ID.Hex256())
 	}
 }
 

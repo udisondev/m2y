@@ -1,6 +1,8 @@
 package node
 
-import "sync"
+import (
+	"sync"
+)
 
 type messageCache struct {
 	pos   int
@@ -34,7 +36,7 @@ func (mc *messageCache) put(nonce string) {
 	}
 
 	mc.pos++
-	if mc.pos > len(mc.bucks) {
+	if mc.pos > len(mc.bucks)-1 {
 		mc.pos = 0
 	}
 
@@ -48,6 +50,7 @@ func (mc *messageCache) putIfAbsent(nonce string) bool {
 	mc.mu.RLock()
 	for i := len(mc.bucks) - 1; i >= 0; i-- {
 		if _, ok := mc.bucks[i][nonce]; ok {
+			mc.mu.RUnlock()
 			return true
 		}
 	}

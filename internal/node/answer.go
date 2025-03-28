@@ -101,7 +101,6 @@ func handleMineAnswer(n *Node, answerMsg income) {
 
 		go func() {
 			defer func() {
-				log.Println("RTC outbox closed")
 				ans.pc.Close()
 				ans.dc.Close()
 			}()

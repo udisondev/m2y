@@ -56,11 +56,6 @@ func offer(n *Node, offerMsg income) {
 		return
 	}
 
-	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateClosed {
-		}
-	})
-
 	pc.OnDataChannel(func(dataChannel *webrtc.DataChannel) {
 		dataChannel.OnOpen(func() {
 			n.waitOffersMu.Lock()
@@ -72,7 +67,6 @@ func offer(n *Node, offerMsg income) {
 			pong := make(chan struct{})
 
 			dataChannel.OnClose(func() {
-				log.Println("Datachannel closed")
 				close(inbox)
 			})
 
@@ -110,7 +104,6 @@ func offer(n *Node, offerMsg income) {
 
 			go func() {
 				defer func() {
-					log.Println("RTC outbox closed")
 					pc.Close()
 					dataChannel.Close()
 				}()
@@ -139,7 +132,7 @@ func offer(n *Node, offerMsg income) {
 				return
 			}
 
-			peer.Send(NewSignal(
+			go peer.Send(NewSignal(
 				SignalTypeConnectionSecret,
 				of.secret,
 			))

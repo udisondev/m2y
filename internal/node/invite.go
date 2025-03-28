@@ -23,7 +23,6 @@ func needInvite(n *Node, invReq income) {
 	peerID := peerID(invReq.Signal.Payload)
 	pubKey, err := ecdh.P256().NewPublicKey(invReq.Signal.Payload)
 	if err != nil {
-		log.Panicln("Error parse public key", err)
 		return
 	}
 
@@ -57,6 +56,7 @@ func needInvite(n *Node, invReq income) {
 
 	go func() {
 		<-time.After(waitOfferTimeout)
+		log.Println("Offer removed")
 		n.waitOffersMu.Lock()
 		delete(n.waitOffers, peerID.Hex256())
 		n.waitOffersMu.Unlock()
@@ -177,6 +177,7 @@ func handleMineInvite(n *Node, inviteMsg income) {
 
 	go func() {
 		<-time.After(waitOfferTimeout)
+		log.Println("Answer removed")
 		n.waitAnswersMu.Lock()
 		delete(n.waitAnswers, peerID.Hex256())
 		n.waitAnswersMu.Unlock()

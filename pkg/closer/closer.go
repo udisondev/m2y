@@ -14,7 +14,9 @@ func init() {
 	termSig := make(chan os.Signal, 1)
 	signal.Notify(termSig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-termSig
+		s := <-termSig
+		log.Println("Os signal:", s)
+
 		wg := sync.WaitGroup{}
 		wg.Add(len(fns))
 		for _, fn := range fns {

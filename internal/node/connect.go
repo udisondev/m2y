@@ -268,46 +268,49 @@ func (n *Node) handleConnection(w http.ResponseWriter, r *http.Request) {
 	n.peersMu.RLock()
 	peersCount := len(n.peers)
 	n.peersMu.RUnlock()
+	trusted := peersCount == 0
 
-	outbox := n.addConn(pubKey, inbox, peersCount == 0)
+	outbox := n.addConn(pubKey, inbox, trusted)
 
 	tcpInteraction(inbox, outbox, conn)
 
-	log.Println("Peers count", peersCount)
-	if peersCount > 0 {
-		n.onboardingsMu.Lock()
-		n.onboardings[peerID.Hex256()] = &onboarding{
-			Secrets:       [][]byte{},
-			RequiresConns: min(peersCount-1, reqConnsCount),
-		}
-		n.onboardingsMu.Unlock()
-
-		go func() {
-			<-time.After(waitConnectionTimeout)
-			n.onboardingsMu.Lock()
-			delete(n.onboardings, peerID.Hex256())
-			n.onboardingsMu.Unlock()
-
-			n.peersMu.RLock()
-			p, ok := n.peers[peerID.Hex256()]
-			n.peersMu.RUnlock()
-			if !ok {
-				return
-			}
-			if p.State == Trusted {
-				return
-			}
-			n.disconnect(peerID.Hex256())
-		}()
-
-		n.broadcast(NewSignal(
-			SignalTypeNeedPeerInvite,
-			pubKey.Bytes(),
-			WithRecepient(peerID.Sum256()),
-		))
-		log.Println("Broadcast onboarding")
+	if trusted {
+		return
 	}
 
+	log.Println("Peers count", peersCount)
+	n.onboardingsMu.Lock()
+	n.onboardings[peerID.Hex256()] = &onboarding{
+		Secrets:       [][]byte{},
+		RequiresConns: min(peersCount, reqConnsCount),
+	}
+	n.onboardingsMu.Unlock()
+
+	go func() {
+		<-time.After(waitConnectionTimeout)
+		log.Println("Onboarding removed")
+		n.onboardingsMu.Lock()
+		delete(n.onboardings, peerID.Hex256())
+		n.onboardingsMu.Unlock()
+
+		n.peersMu.RLock()
+		p, ok := n.peers[peerID.Hex256()]
+		n.peersMu.RUnlock()
+		if !ok {
+			return
+		}
+		if p.State == Trusted {
+			return
+		}
+		n.disconnect(peerID.Hex256())
+	}()
+
+	n.broadcast(NewSignal(
+		SignalTypeNeedPeerInvite,
+		pubKey.Bytes(),
+		WithRecepient(peerID.Sum256()),
+	))
+	log.Println("Broadcast onboarding")
 }
 
 func (n *Node) encryptChallenge(challenge []byte, verifierECPub *ecdh.PublicKey) ([]byte, error) {

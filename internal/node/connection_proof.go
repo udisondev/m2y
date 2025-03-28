@@ -35,16 +35,16 @@ func connectionProof(n *Node, msg income) {
 		log.Println("Receved secret from:", peerHex)
 		onboarding.ConnectionProofs++
 
-		if onboarding.RequiresConns == onboarding.ConnectionProofs {
-			n.trust(peerHex)
-			log.Println(peerHex, "are trusted yet!")
-			delete(n.onboardings, peerHex)
-			n.peersMu.Lock()
-			defer n.peersMu.Unlock()
+		if onboarding.RequiresConns != onboarding.ConnectionProofs {
+			return
+		}
 
-			if len(n.peers) > maxPeersCount {
-				n.disconnect(peerHex)
-			}
+		n.trust(peerHex)
+		log.Println(peerHex, "are trusted yet!")
+		delete(n.onboardings, peerHex)
+
+		if len(n.peers) > maxPeersCount {
+			n.disconnect(peerHex)
 		}
 		return
 	}
