@@ -5,22 +5,16 @@ import "sync"
 type messageCache struct {
 	pos   int
 	mu    sync.RWMutex
-	bucks []cacheBucket
+	bucks []bucket
 }
 
-type cacheBucket struct {
-	count int
-	m     map[string]struct{}
-}
+type bucket map[string]struct{}
 
 func newMessageCache() messageCache {
-	bucketes := make([]cacheBucket, bucketsCount)
+	bucketes := make([]bucket, bucketsCount)
 
 	for i := range bucketes {
-		bucketes[i] = cacheBucket{
-			count: bucketCapacity,
-			m:     make(map[string]struct{}, bucketCapacity),
-		}
+		bucketes[i] = make(map[string]struct{}, bucketCapacity)
 	}
 
 	return messageCache{
@@ -44,7 +38,7 @@ func (mc *messageCache) put(nonce string) {
 		mc.pos = 0
 	}
 
-	b = cacheBucket{m: make(map[string]struct{}, bucketCapacity)}
+	b = make(map[string]struct{}, bucketCapacity)
 	mc.bucks[mc.pos] = b
 
 	b.put(nonce)
@@ -53,7 +47,7 @@ func (mc *messageCache) put(nonce string) {
 func (mc *messageCache) putIfAbsent(nonce string) bool {
 	mc.mu.RLock()
 	for i := len(mc.bucks) - 1; i >= 0; i-- {
-		if mc.bucks[i].exists(nonce) {
+		if _, ok := mc.bucks[i][nonce]; ok {
 			return true
 		}
 	}
@@ -63,17 +57,10 @@ func (mc *messageCache) putIfAbsent(nonce string) bool {
 	return false
 }
 
-func (cb *cacheBucket) put(nonce string) bool {
-	if cb.count > bucketCapacity/100*8 {
+func (b bucket) put(nonce string) bool {
+	if len(b) > bucketCapacity/100*8 {
 		return false
 	}
-	cb.m[nonce] = struct{}{}
-	cb.count++
+	b[nonce] = struct{}{}
 	return true
-}
-
-func (cb *cacheBucket) exists(nonce string) bool {
-	_, ok := cb.m[nonce]
-
-	return ok
 }
