@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -30,15 +31,17 @@ type (
 	}
 
 	Node struct {
-		listenAddr    *net.TCPAddr
+		listenAddr    string
+		entrypoint    string
 		bufPool       *sync.Pool
+		pubKeyPool    *sync.Pool
 		noncePool     *sync.Pool
 		challangePool *sync.Pool
 		peerPool      *sync.Pool
-		mpeerMu       *sync.RWMutex
+		mpeerMu       sync.RWMutex
 		mpeer         map[string]*peer
-		dispatcher
-		cache
+		*dispatcher
+		*cache
 	}
 )
 
@@ -58,71 +61,105 @@ const (
 )
 
 func New(conf config.Config) *Node {
-	bufPool := sync.Pool{}
-	bufPool.New = func() any { return make([]byte, 0, 1024) }
+	logPref := "node.New"
+	bufPool := sync.Pool{
+		New: func() any { return make([]byte, 1024) },
+	}
+	logger.Debugf(logPref, "bufPool initialized")
 
 	peerPool := sync.Pool{}
 	for range maxPeersCount {
 		peerPool.Put(&peer{})
 	}
+	logger.Debugf(logPref, "%d peers placed into peerBoof", maxPeersCount)
+
+	key, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(fmt.Errorf("generate prinvate ecdh: %v", err))
+	}
+
+	publicSign, privateSign, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(fmt.Errorf("generate sign pair: %v", err))
+	}
 
 	n := Node{
-		bufPool:  &bufPool,
+		bufPool: &bufPool,
+		pubKeyPool: &sync.Pool{
+			New: func() any { return make([]byte, 65) },
+		},
 		peerPool: &peerPool,
+		dispatcher: &dispatcher{
+			ecdh:        key,
+			publicSign:  publicSign,
+			privateSign: privateSign,
+		},
+		challangePool: &sync.Pool{
+			New: func() any { return make([]byte, 32) },
+		},
+		cache: newCache(),
+		mpeer: make(map[string]*peer, maxPeersCount),
+	}
+
+	if conf.Entrypoint != "" {
+		n.entrypoint = conf.Entrypoint
 	}
 
 	if conf.ListenAddr != "" {
-		addr, err := net.ResolveTCPAddr("tcp", conf.ListenAddr)
-		if err != nil {
-			panic(fmt.Errorf("could not parse listen addr as TCPAddr: %v", err))
-		}
-		n.listenAddr = addr
+		logger.Debugf(logPref, "I'am an entrypoint and going to listen: %s", conf.ListenAddr)
+		n.listenAddr = conf.ListenAddr
 
 		n.peerPool.New = func() any { return &peer{} }
 
-		n.noncePool = &sync.Pool{}
-		n.noncePool.New = func() any { return make([]byte, 0, 12) }
-
-		n.challangePool = &sync.Pool{}
-		n.challangePool.New = func() any { return make([]byte, 0, 32) }
+		n.noncePool = &sync.Pool{
+			New: func() any { return make([]byte, 12) },
+		}
 	}
 
+	logger.Debugf(logPref, "Node configured!")
 	return &n
 }
 
-func (n *Node) Run(entrypoint *net.TCPAddr) {
-	if entrypoint == nil {
-		panic("entrypoint is nil")
+func (n *Node) Run() {
+	logPref := "Node.Run"
+	if n.entrypoint != "" {
+		logger.Debugf(logPref, "Entrypoint is not nil, going to connect to: %s", n.entrypoint)
+		go func() {
+			err := n.Connect(n.entrypoint)
+			if err != nil {
+				panic(fmt.Errorf("could not connect to the %s: %v", n.entrypoint, err))
+			}
+		}()
 	}
 
-	err := n.Connect(entrypoint)
-	if err != nil {
-		panic(fmt.Errorf("could not connect to the %+v: %v", entrypoint, err))
-	}
-
-	if n.listenAddr != nil {
+	if n.listenAddr != "" {
+		logger.Debugf(logPref, "Listen address is not nil, going to listen: %s", n.listenAddr)
 		go n.listen(n.listenAddr)
 	}
 }
 
-func (n *Node) Connect(addr *net.TCPAddr) error {
-	header := "Node.Connect"
-	conn, err := net.DialTCP("tcp", nil, addr)
+func (n *Node) Connect(addr string) error {
+	logPref := "Node.Connect"
+	logger.Debugf(logPref, "Going to dial TCP...")
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return err
 	}
 
-	err = conn.SetReadBuffer(1024)
-	if err != nil {
-		return fmt.Errorf("set read buffer: %v", err)
-	}
+	defer func() {
+		if err != nil {
+			conn.Close()
+		}
+	}()
 
-	pubKeyBuf := n.bufPool.Get().(*bytes.Buffer)
-	pubKeyBuf.Reset()
-	defer n.bufPool.Put(pubKeyBuf)
+	logger.Debugf(logPref, "Connection established...")
+
+	logger.Debugf(logPref, "Reading entrypoint's public key...")
+	pubKeyBuf := n.pubKeyPool.Get().([]byte)
+	defer n.pubKeyPool.Put(pubKeyBuf)
 
 	for read := 0; read < pubKeyLenth; {
-		n, err := conn.Read(pubKeyBuf.Bytes())
+		n, err := conn.Read(pubKeyBuf[read:])
 		if errors.Is(err, io.EOF) && read < pubKeyLenth {
 			return errors.New("short pub key")
 		}
@@ -135,14 +172,15 @@ func (n *Node) Connect(addr *net.TCPAddr) error {
 			return fmt.Errorf("read pub key: %w", err)
 		}
 		read += n
+		//	logger.Debugf(logPref, "%d bytes read...", read)
 	}
-	logger.Debugf(header, "Received entrypoint public key...")
+	logger.Debugf(logPref, "Received entrypoint public key...")
 
-	pubKey, err := ecdh.P256().NewPublicKey(pubKeyBuf.Bytes())
+	pubKey, err := ecdh.P256().NewPublicKey(pubKeyBuf)
 	if err != nil {
 		return fmt.Errorf("parse pub key: %w", err)
 	}
-	logger.Debugf(header, "Public key parsed...")
+	logger.Debugf(logPref, "Public key parsed...")
 
 	for written := 0; written < pubKeyLenth; {
 		n, err := conn.Write(n.ecdh.PublicKey().Bytes()[written:])
@@ -151,7 +189,7 @@ func (n *Node) Connect(addr *net.TCPAddr) error {
 		}
 		written += n
 	}
-	logger.Debugf(header, "My public key was sent...")
+	logger.Debugf(logPref, "My public key was sent...")
 
 	var mlen uint32
 	err = binary.Read(conn, binary.BigEndian, &mlen)
@@ -159,11 +197,13 @@ func (n *Node) Connect(addr *net.TCPAddr) error {
 		return fmt.Errorf("read challange length: %w", err)
 	}
 
-	challenge := n.challangePool.Get().([]byte)
-	defer n.challangePool.Put(challenge)
+	logger.Debugf(logPref, "Recieved pack with length: %d", mlen)
+
+	challangeBuf := n.buf()
+	defer n.putBuf(challangeBuf)
 
 	for read := 0; read < int(mlen); {
-		n, err := conn.Read(challenge)
+		n, err := conn.Read(challangeBuf[read:])
 		if errors.Is(err, io.EOF) && read < int(mlen) {
 			return errors.New("short challange")
 		}
@@ -178,13 +218,13 @@ func (n *Node) Connect(addr *net.TCPAddr) error {
 
 		read += n
 	}
-	logger.Debugf(header, "Challange read...")
+	logger.Debugf(logPref, "Challange read...")
 
-	err = n.solveChallange(challenge, pubKey, conn)
+	err = n.solveChallange(challangeBuf[:mlen], pubKey, conn)
 	if err != nil {
 		return fmt.Errorf("solving challange: %w", err)
 	}
-	logger.Debugf(header, "Challange solved...")
+	logger.Debugf(logPref, "Challange solved...")
 
 	init, _ := n.bookPeer()
 	if init == nil {
@@ -195,7 +235,7 @@ func (n *Node) Connect(addr *net.TCPAddr) error {
 	conn.SetWriteDeadline(time.Time{})
 
 	init(true, true, pubKey, conn)
-	logger.Debugf(header, "Connected to entrypoint!")
+	logger.Debugf(logPref, "Connected to entrypoint!")
 
 	return nil
 }
@@ -252,51 +292,27 @@ func (n *Node) bookPeer() (init func(
 		go func() {
 			header := fmt.Sprintf("Peer=%s", peer.hash())
 
-			decryptedBuf := n.bufPool.Get().(*bytes.Buffer)
-			filteredBuf := n.bufPool.Get().(*bytes.Buffer)
-			dispatchedBuf := n.bufPool.Get().(*bytes.Buffer)
-			callbackBuf := n.bufPool.Get().(*bytes.Buffer)
-
-			defer n.bufPool.Put(decryptedBuf)
-			defer n.bufPool.Put(filteredBuf)
-			defer n.bufPool.Put(dispatchedBuf)
-			defer n.bufPool.Put(callbackBuf)
-
 			for {
-				decryptedBuf.Reset()
-				filteredBuf.Reset()
-				dispatchedBuf.Reset()
-				callbackBuf.Reset()
-
-				err := n.decrypt(pubKey, rw, decryptedBuf)
+				dectypted, err := n.decrypt(pubKey, rw)
 				if err != nil {
 					return
 				}
 				logger.Debugf(header, "Decrypted...")
 
-				err = n.filter(decryptedBuf, filteredBuf)
-				if errors.Is(err, errDuplicated) {
+				if !n.filter(dectypted) {
 					continue
 				}
-				if err != nil {
-					return
-				}
+
 				logger.Debugf(header, "Filtered...")
 
-				n.dispatch(filteredBuf, dispatchedBuf)
+				a, b := n.dispatch(dectypted)
 
-				_, err = callbackBuf.ReadFrom(dispatchedBuf)
-				if err != nil {
-					return
-				}
-
-				a, _ := callbackBuf.ReadByte()
-				n.put(hex.EncodeToString(signal(callbackBuf.Bytes()).nonce()))
+				n.put(hex.EncodeToString(signal(b).nonce()))
 				switch a {
 				case disconnect:
 					return
 				case direct:
-					err = n.encrypt(pubKey, callbackBuf, rw)
+					err = n.encrypt(pubKey, b, rw)
 					if err != nil {
 						return
 					}
@@ -306,10 +322,7 @@ func (n *Node) bookPeer() (init func(
 							continue
 						}
 
-						buf := n.bufPool.Get().(*bytes.Buffer)
-						buf.Reset()
-						err = n.encrypt(p.pubKey, buf, p.w)
-						n.bufPool.Put(buf)
+						err = n.encrypt(p.pubKey, b, p.w)
 						if err != nil {
 							p.disconnect()
 							continue
@@ -323,18 +336,9 @@ func (n *Node) bookPeer() (init func(
 	}, free
 }
 
-func (n *Node) encrypt(pubKey *ecdh.PublicKey, r io.Reader, w io.Writer) error {
-	buf := n.bufPool.Get().(*bytes.Buffer)
-	defer n.bufPool.Put(buf)
-
-	buf.Reset()
-	_, err := buf.ReadFrom(r)
-	if err != nil {
-		return err
-	}
-
+func (n *Node) encrypt(pubKey *ecdh.PublicKey, b []byte, w io.Writer) error {
 	encrypted, err := crypt.EncryptPeerMessage(
-		buf.Bytes(),
+		b,
 		n.ecdh,
 		n.privateSign,
 		n.publicSign,
@@ -357,58 +361,53 @@ func (n *Node) encrypt(pubKey *ecdh.PublicKey, r io.Reader, w io.Writer) error {
 	return nil
 }
 
-func (n *Node) filter(in *bytes.Buffer, out *bytes.Buffer) error {
-	if n.putIfAbsent(hex.EncodeToString(signal(in.Bytes()).nonce())) {
-		return errDuplicated
-	}
-
-	out.Write(in.Bytes())
-
-	return nil
+func (n *Node) filter(b []byte) bool {
+	return n.putIfAbsent(hex.EncodeToString(signal(b).nonce()))
 }
 
-func (n *Node) decrypt(pubKey *ecdh.PublicKey, in io.Reader, out *bytes.Buffer) error {
-	buf := n.bufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer n.bufPool.Put(buf)
+func (n *Node) decrypt(pubKey *ecdh.PublicKey, in io.Reader) ([]byte, error) {
+	buf := n.buf()
+	defer n.putBuf(buf)
 
 	var mlen uint32
 	err := binary.Read(in, binary.BigEndian, &mlen)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	for read := 0; read < int(mlen); {
-		n, err := buf.ReadFrom(in)
+		n, err := in.Read(buf[read:])
 		if errors.Is(err, io.EOF) && read == int(mlen) {
 			break
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		read += int(n)
 	}
 
-	decrypted, err := crypt.DecryptPeerMessage(buf.Bytes(), n.ecdh, pubKey)
+	decrypted, err := crypt.DecryptPeerMessage(buf, n.ecdh, pubKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	out.Write(decrypted)
-
-	return nil
+	return decrypted, nil
 }
 
-func (n *Node) listen(addr *net.TCPAddr) error {
-	tcpListener, err := net.ListenTCP("tcp", addr)
+func (n *Node) listen(addr string) error {
+	logPref := "Node.listen"
+	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
 
+	defer l.Close()
+
 	for {
-		conn, err := tcpListener.AcceptTCP()
+		conn, err := l.Accept()
 		if err != nil {
+			logger.Errorf(logPref, "Error accept TCP: %v", err)
 			continue
 		}
 
@@ -416,70 +415,65 @@ func (n *Node) listen(addr *net.TCPAddr) error {
 	}
 }
 
-func (n *Node) handleConn(conn *net.TCPConn) {
-	header := "Node.handleConn"
-	err := conn.SetReadBuffer(1024)
+func (n *Node) handleConn(conn net.Conn) {
+	logPref := "Node.handleConn"
+
+	err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err != nil {
-		logger.Errorf(header, "Error set read buffer: %v", err)
+		logger.Errorf(logPref, "Error set write deadline", err)
 		return
 	}
 
-	err = conn.SetWriteDeadline(time.Now().Add(time.Second))
+	defer func() {
+		if err != nil {
+			conn.Close()
+		}
+	}()
+
+	err = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	if err != nil {
-		logger.Errorf(header, "Error set deadline to sending my public key: %v", err)
+		logger.Errorf(logPref, "Error set read deadline", err)
 		return
 	}
 
 	for written := 0; written < pubKeyLenth; {
 		n, err := conn.Write(n.ecdh.PublicKey().Bytes()[written:])
-		if errors.Is(err, io.EOF) {
-			break
-		}
-
 		if err != nil {
-			logger.Errorf(header, "Error write my public key: %v", err)
+			logger.Errorf(logPref, "Error write my public key: %v", err)
 			return
 		}
 		written += n
+		logger.Debugf(logPref, "%d bytes of public key was sent", written)
 	}
-	logger.Debugf(header, "My public key was sent...")
+	logger.Debugf(logPref, "My public key was sent...")
 
-	pubKeyBuf := n.bufPool.Get().(*bytes.Buffer)
-	pubKeyBuf.Reset()
-	defer n.bufPool.Put(pubKeyBuf)
-
-	err = conn.SetReadDeadline(time.Now().Add(time.Second))
-	if err != nil {
-		logger.Errorf(header, "Error set deadline to reading guest's public key: %v", err)
-		return
-	}
+	pubKeyBuf := n.pubKeyPool.Get().([]byte)
+	defer n.pubKeyPool.Put(pubKeyBuf)
 
 	for read := 0; read < pubKeyLenth; {
-		n, err := conn.Read(pubKeyBuf.Bytes())
+		n, err := conn.Read(pubKeyBuf[read:])
 		if errors.Is(err, io.EOF) && read < pubKeyLenth {
-			logger.Errorf(header, "Unexpected EOF. Receiving public key")
+			logger.Errorf(logPref, "Error reading new connection's public key. Too short")
 			return
 		}
-
 		if errors.Is(err, io.EOF) {
 			break
 		}
-
 		if err != nil {
-			logger.Errorf(header, "Error read guest's public key: %v", err)
+			logger.Errorf(logPref, "Error reading new connection's public key: %v", err)
 			return
 		}
 		read += n
 	}
 
-	logger.Debugf(header, "Received new connectrion's public key...")
+	logger.Debugf(logPref, "Received new connectrion's public key...")
 
-	pubKey, err := ecdh.P256().NewPublicKey(pubKeyBuf.Bytes())
+	pubKey, err := ecdh.P256().NewPublicKey(pubKeyBuf)
 	if err != nil {
-		logger.Errorf(header, "Error parse guest's public key: %v", err)
+		logger.Errorf(logPref, "Error parse guest's public key: %v", err)
 		return
 	}
-	logger.Debugf(header, "Public key parsed...")
+	logger.Debugf(logPref, "Public key parsed...")
 
 	challenge := n.challangePool.Get().([]byte)
 	defer n.challangePool.Put(challenge)
@@ -487,7 +481,7 @@ func (n *Node) handleConn(conn *net.TCPConn) {
 	for read := 0; read < challangeLength; {
 		n, err := rand.Read(challenge)
 		if errors.Is(err, io.EOF) && read < challangeLength {
-			logger.Errorf(header, "Unexpected EOF. Generating challange")
+			logger.Errorf(logPref, "Unexpected EOF. Generating challange")
 			return
 		}
 
@@ -496,48 +490,37 @@ func (n *Node) handleConn(conn *net.TCPConn) {
 		}
 
 		if err != nil {
-			logger.Errorf(header, "Error generate challange: %v", err)
+			logger.Errorf(logPref, "Error generate challange: %v", err)
 			return
 		}
 
 		read += n
 	}
-	logger.Debugf(header, "Challange generated...")
-
-	err = conn.SetWriteDeadline(time.Now().Add(time.Second))
-	if err != nil {
-		logger.Errorf(header, "Error set deadline to sending challange: %v", err)
-		return
-	}
+	logger.Debugf(logPref, "Challange generated...")
 
 	err = n.encryptAndWriteChallenge(challenge, pubKey, conn)
 	if err != nil {
-		logger.Errorf(header, "Error send challange: %v", err)
+		logger.Errorf(logPref, "Error send challange: %v", err)
 		return
 	}
-	logger.Debugf(header, "Challange sent...")
-
-	solvedBuf := n.bufPool.Get().(*bytes.Buffer)
-	solvedBuf.Reset()
-	defer n.bufPool.Put(solvedBuf)
-
-	err = conn.SetReadDeadline(time.Now().Add(time.Second))
-	if err != nil {
-		logger.Errorf(header, "Error set deadline to reading challange solving: %v", err)
-		return
-	}
+	logger.Debugf(logPref, "Challange sent...")
 
 	var mlen uint32
 	err = binary.Read(conn, binary.BigEndian, &mlen)
 	if err != nil {
-		logger.Errorf(header, "Error read solved challange message length: %v", err)
+		logger.Errorf(logPref, "Error read solved challange message length: %v", err)
 		return
 	}
 
+	logger.Debugf(logPref, "Received solved challange pack with length: %d", mlen)
+
+	solvedBuf := n.buf()
+	defer n.putBuf(solvedBuf)
+
 	for read := 0; read < int(mlen); {
-		n, err := conn.Read(solvedBuf.Bytes())
+		n, err := conn.Read(solvedBuf[read:])
 		if errors.Is(err, io.EOF) && read < int(mlen) {
-			logger.Errorf(header, "Unexpected EOF. Reading challange solving")
+			logger.Errorf(logPref, "Unexpected EOF. Reading challange solving")
 			return
 		}
 
@@ -546,30 +529,28 @@ func (n *Node) handleConn(conn *net.TCPConn) {
 		}
 
 		if err != nil {
-			logger.Errorf(header, "Error read challange solving: %v", err)
+			logger.Errorf(logPref, "Error read challange solving: %v", err)
 			return
 		}
 
 		read += n
 	}
-	logger.Debugf(header, "Received challange solving...")
+	logger.Debugf(logPref, "Received challange solving...")
 
-	err = n.checkChallenge(challenge, solvedBuf.Bytes(), pubKey)
-	if errors.Is(err, errChallengeSolving) {
-		logger.Warnf(header, "challange failed!")
+	if !n.checkChallenge(challenge, solvedBuf[:mlen]) {
 		return
 	}
 
-	logger.Debugf(header, "Challange successfuly passed...")
+	logger.Debugf(logPref, "Challange successfuly passed...")
 
 	if err != nil {
-		logger.Errorf(header, "Error check challange solving: %v", err)
+		logger.Errorf(logPref, "Error check challange solving: %v", err)
 		return
 	}
 
 	init, _ := n.bookPeer()
 	if init == nil {
-		logger.Errorf(header, "Error set read buffer: %v", err)
+		logger.Errorf(logPref, "Error set read buffer: %v", err)
 		return
 	}
 
@@ -583,7 +564,7 @@ func (n *Node) handleConn(conn *net.TCPConn) {
 	needOnboard := peersCount > 0
 	init(false, needOnboard, pubKey, conn)
 
-	logger.Debugf(header, "New conn onboarded!")
+	logger.Debugf(logPref, "New conn onboarded!")
 }
 
 func (n *Node) encryptAndWriteChallenge(challenge []byte, verifierECPub *ecdh.PublicKey, w io.Writer) error {
@@ -623,31 +604,8 @@ func (n *Node) encryptAndWriteChallenge(challenge []byte, verifierECPub *ecdh.Pu
 	return err
 }
 
-func (n *Node) checkChallenge(challenge []byte, enctyptedSolved []byte, verifierECPub *ecdh.PublicKey) error {
-	sharedSecret, err := n.ecdh.ECDH(verifierECPub)
-	if err != nil {
-		return fmt.Errorf("generate sharred secret: %w", err)
-	}
-
-	sharedKey := sha256.Sum256(sharedSecret)
-
-	block, err := aes.NewCipher(sharedKey[:])
-	if err != nil {
-		return fmt.Errorf("generate new cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return fmt.Errorf("generate new gsm: %w", err)
-	}
-	nonceSize := gcm.NonceSize()
-	nonce, ciphertext := enctyptedSolved[:nonceSize], enctyptedSolved[nonceSize:]
-
-	decrypted, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if !bytes.Equal(challenge, decrypted) {
-		return errChallengeSolving
-	}
-
-	return nil
+func (n *Node) checkChallenge(challenge []byte, solved []byte) bool {
+	return bytes.Equal(challenge, solved)
 }
 
 func (n *Node) solveChallange(ciphertext []byte, verifierECPub *ecdh.PublicKey, w io.Writer) error {
@@ -674,6 +632,11 @@ func (n *Node) solveChallange(ciphertext []byte, verifierECPub *ecdh.PublicKey, 
 		return fmt.Errorf("decrypt challange: %w", err)
 	}
 
+	err = binary.Write(w, binary.BigEndian, uint32(len(decrypted)))
+	if err != nil {
+		return fmt.Errorf("send solved challange length: %w", err)
+	}
+
 	for written := 0; written < len(decrypted); {
 		n, err := w.Write(decrypted[written:])
 		if err != nil {
@@ -695,4 +658,16 @@ func (p *peer) reset() {
 func (p *peer) hash() string {
 	sum := sha256.Sum256(p.pubKey.Bytes())
 	return hex.EncodeToString(sum[:])
+}
+
+func (n *Node) buf() []byte {
+	bts := n.bufPool.Get().([]byte)
+	for i := range bts {
+		bts[i] = 0
+	}
+	return bts
+}
+
+func (n *Node) putBuf(b []byte) {
+	n.bufPool.Put(b)
 }

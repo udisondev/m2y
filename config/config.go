@@ -19,49 +19,11 @@ const (
 	ClientBrowser = "browser"
 )
 
-type ConfOpt func(Config) Config
-
-func WithClient(client string) ConfOpt {
-	return func(c Config) Config {
-		c.Client = client
-		return c
-	}
-}
-
-func WithListenAddr(listenAddr string) ConfOpt {
-	return func(c Config) Config {
-		c.ListenAddr = listenAddr
-		return c
-	}
-}
-
-func WithChatPort(port int) ConfOpt {
-	return func(c Config) Config {
-		c.ChatPort = port
-		return c
-	}
-}
-
-func WithIDPath(path string) ConfOpt {
-	return func(c Config) Config {
-		c.IDPath = path
-		return c
-	}
-}
-
-func WithEntrypoint(entrypoint string) ConfOpt {
-	return func(c Config) Config {
-		c.Entrypoint = entrypoint
-		return c
-	}
-}
-
-func New(opts ...ConfOpt) Config {
+func New() Config {
 	conf := Config{
-		Client:     ClientCLI,
-		ChatPort:   7000,
-		IDPath:     "",
-		Entrypoint: "localhost:8000",
+		Client:   ClientCLI,
+		ChatPort: 7000,
+		IDPath:   "",
 	}
 
 	client := os.Getenv("M2Y_CLIENT")
@@ -91,10 +53,6 @@ func New(opts ...ConfOpt) Config {
 	entrypoint := os.Getenv("M2Y_ENTRYPOINT")
 	if entrypoint != "" {
 		conf.Entrypoint = entrypoint
-	}
-
-	for _, opt := range opts {
-		conf = opt(conf)
 	}
 
 	return conf

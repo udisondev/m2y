@@ -2,10 +2,10 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"m2y/config"
 	"m2y/internal/node"
-	"net"
+	"sync"
+	"time"
 )
 
 var (
@@ -17,29 +17,35 @@ var (
 )
 
 func main() {
-	flag.Parse()
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runInstance(config.Config{
+			Client:     config.ClientCLI,
+			ListenAddr: "localhost:8000",
+			ChatPort:   0,
+		})
+	}()
 
-	opts := []config.ConfOpt{}
-	if *clientFlag != "" {
-		opts = append(opts, config.WithClient(*clientFlag))
-	}
-	if *listenAddrFlag != "" {
-		opts = append(opts, config.WithListenAddr(*listenAddrFlag))
-	}
-	if *chatPortFlag != 0 {
-		opts = append(opts, config.WithChatPort(*chatPortFlag))
-	}
-	if *idPathFlag != "" {
-		opts = append(opts, config.WithIDPath(*idPathFlag))
-	}
+	<-time.After(time.Second * 2)
 
-	conf := config.New(opts...)
-	entrypoint, err := net.ResolveTCPAddr("tcp", conf.Entrypoint)
-	if err != nil {
-		panic(fmt.Errorf("error parse entrypoint address: %v", err))
-	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runInstance(config.Config{
+			Client:     config.ClientCLI,
+			Entrypoint: "localhost:8000",
+			ChatPort:   0,
+		})
+	}()
 
+	wg.Wait()
+
+}
+
+func runInstance(conf config.Config) {
 	n := node.New(conf)
-
-	n.Run(entrypoint)
+	n.Run()
+	select {}
 }

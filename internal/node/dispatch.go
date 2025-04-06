@@ -1,7 +1,6 @@
 package node
 
 import (
-	"bytes"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"sync"
@@ -14,12 +13,10 @@ type dispatcher struct {
 	publicSign  ed25519.PublicKey
 }
 
-func (d *dispatcher) dispatch(in *bytes.Buffer, out *bytes.Buffer) {
-	s := signal(in.Bytes())
+func (d *dispatcher) dispatch(b []byte) (byte, []byte) {
+	s := signal(b)
 	if !s.forMe(d.ecdh.PublicKey().Bytes()) {
-		out.WriteByte(broadcast)
-		out.Write(in.Bytes())
-		return
+		return broadcast, b
 	}
 
 	switch s.stype() {
@@ -37,9 +34,9 @@ func (d *dispatcher) dispatch(in *bytes.Buffer, out *bytes.Buffer) {
 		d.handleConnProof(s)
 	case stTrusted:
 		d.handleTrusted(s)
-	default:
-		return
 	}
+
+	return disconnect, nil
 }
 
 func (d *dispatcher) handleNeedInvite(s signal) {

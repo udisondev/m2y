@@ -8,6 +8,17 @@ type cache struct {
 	buckets []map[string]struct{}
 }
 
+func newCache() *cache {
+	bucks := make([]map[string]struct{}, 0, cacheBucketsCount)
+	for i := range bucks {
+		bucks[i] = make(map[string]struct{}, cacheBucketSize)
+	}
+
+	return &cache{
+		buckets: bucks,
+	}
+}
+
 func (c *cache) putIfAbsent(hash string) bool {
 	c.mu.RLock()
 	pos := c.pos

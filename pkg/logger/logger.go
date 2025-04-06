@@ -7,10 +7,10 @@ import (
 )
 
 var (
-	debugLog = log.New(os.Stdin, "DEBUG", log.Ldate|log.Ltime)
-	infoLog  = log.New(os.Stdin, "INFO", log.Ldate|log.Ltime)
-	warnLog  = log.New(os.Stdin, "WARN", log.Ldate|log.Ltime)
-	errorLog = log.New(os.Stdin, "ERROR", log.Ldate|log.Ltime)
+	debugLog = log.New(os.Stdin, " |DEBUG| ", log.Ldate|log.Ltime|log.Lmsgprefix)
+	infoLog  = log.New(os.Stdin, " |INFO| ", log.Ldate|log.Ltime|log.Lmsgprefix)
+	warnLog  = log.New(os.Stdin, " |WARN| ", log.Ldate|log.Ltime|log.Lmsgprefix)
+	errorLog = log.New(os.Stdin, " |ERROR| ", log.Ldate|log.Ltime|log.Lmsgprefix)
 	level    = LDebug
 )
 
@@ -27,7 +27,7 @@ func Debugf(pref string, msg string, args ...any) {
 	}
 
 	if pref != "" {
-		msg = fmt.Sprintf("<%s>: %s", pref, msg)
+		msg = fmt.Sprintf("<%s> %s", pref, msg)
 	}
 
 	if len(args) > 0 {
